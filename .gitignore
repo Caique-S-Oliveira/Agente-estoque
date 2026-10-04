@@ -1,0 +1,16 @@
+# Segredos: NUNCA vão para o GitHub
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Dados de clientes e arquivos gerados
+*.csv
+*.xlsx
+pendencias_importacao.csv
+products-VTech.csv
+Backup
