@@ -79,6 +79,7 @@ AJUDA = (
     "/baixo - itens acabando\n"
     "/relatorio [dias] - análise do período (padrão 30 dias)\n"
     "/buscar termo - procura por código, nome ou máquina\n"
+    "/itens - lista todos os itens (código, nome e quantidade)\n"
     "/entrada CODIGO QTD - dá entrada\n"
     "/saida CODIGO QTD - dá saída\n"
     "/ajuste CODIGO NOVO_SALDO - corrige o saldo para um valor exato\n"
@@ -221,6 +222,18 @@ def cmd_buscar(empresa_id: str, args: str) -> str:
     if not achados:
         return f"Nada encontrado para '{args}'."
     return "\n\n".join(formatar_item(i) for i in achados)
+
+
+def cmd_itens(empresa_id: str) -> str:
+    """
+    /itens: lista TODOS os itens, uma linha cada (código - nome - quantidade), em ordem de código.
+    Útil para conferir o catálogo. Mensagens longas são divididas pelo whatsapp.py.
+    """
+    itens = sorted(todos_itens(empresa_id), key=lambda i: i["codigo"])
+    if not itens:
+        return "Nenhum item cadastrado ainda."
+    linhas = [f"{i['codigo']} - {i['nome']} ({i['quantidade']})" for i in itens]
+    return f"📋 {len(itens)} itens (código - nome - quantidade)\n" + "\n".join(linhas)
 
 
 def cmd_movimentar(empresa_id: str, usuario_id: str, tipo: str, args: str) -> str:
@@ -581,6 +594,8 @@ def _executar_comando_bruto(usuario: dict, texto: str) -> str:
             return cmd_relatorio(empresa_id, args)
         if comando == "/buscar":
             return cmd_buscar(empresa_id, args)
+        if comando == "/itens":
+            return cmd_itens(empresa_id)
         if comando == "/entrada":
             return cmd_movimentar(empresa_id, usuario_id, "entrada", args)
         if comando == "/saida":
