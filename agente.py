@@ -3,8 +3,9 @@ import unicodedata
 from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
 from config import MARGEM_SUGERIDA, PRECO_IA_ENTRADA_USD, PRECO_IA_SAIDA_USD
-from cerebro import interpretar, cancelar_pendente, _achar_itens
+from cerebro import interpretar, cancelar_pendente, _achar_itens, _executar_movimento, _extrair_custo
 from database import (
+    ultimas_entradas,
     usuario_autorizado, salvar_mensagem,
     buscar_item_por_codigo, buscar_itens, adicionar_item,
     registrar_movimentacao, ajustar_saldo, resumo_estoque, itens_baixos,
@@ -73,14 +74,54 @@ def formatar_item(item: dict, mostrar_custo: bool = False) -> str:
     return texto.rstrip()
 
 
+def formatar_item_admin(item: dict, entrada: dict = None) -> str:
+    """
+    Versão do administrador: tudo que o operador vê, mais custo unitário, valor em estoque
+    (quantidade x custo) e a última entrada (data, quantidade e, se foi informado, o custo pago).
+    `entrada` é a última movimentação de entrada do item (ou None se nunca houve compra).
+    """
+    custo = float(item["preco_custo"])
+    texto = (
+        f"📦 {item['nome']} ({item['codigo']})\n"
+        f"   Quantidade: {item['quantidade']} (mínimo {item['estoque_minimo']})\n"
+        f"   Custo unitário: {moeda(custo)}\n"
+        f"   Valor em estoque: {moeda(item['quantidade'] * custo)}\n"
+        f"   Valor sugerido: {moeda(preco_sugerido(custo))}\n"
+    )
+    if entrada:
+        detalhe = f"+{entrada['quantidade']} un"
+        if entrada.get("custo_unitario") is not None:
+            detalhe += f" a {moeda(float(entrada['custo_unitario']))} cada"
+        texto += f"   Última entrada: {formatar_data(entrada['criado_em'])} ({detalhe})\n"
+    else:
+        texto += "   Última entrada: nenhuma registrada\n"
+    if item["maquina_compativel"]:
+        texto += f"   Máquina: {item['maquina_compativel']}\n"
+    if item["localizacao"]:
+        texto += f"   Local: {item['localizacao']}\n"
+    return texto.rstrip()
+
+
+def texto_itens(empresa_id: str, itens: list, admin: bool = False) -> str:
+    """
+    Monta o texto de uma lista de itens: formato simples para operador, completo para admin.
+    Para o admin, a última entrada de TODOS os itens vem de UMA consulta só (não uma por item).
+    Serve tanto para o /buscar quanto para as consultas em linguagem natural (via IA).
+    """
+    if not admin:
+        return "\n\n".join(formatar_item(i) for i in itens)
+    entradas = ultimas_entradas(empresa_id, [i["id"] for i in itens])
+    return "\n\n".join(formatar_item_admin(i, entradas.get(i["id"])) for i in itens)
+
+
 AJUDA = (
     "Comandos disponíveis:\n"
     "/estoque - resumo rápido\n"
     "/baixo - itens acabando\n"
     "/relatorio [dias] - análise do período (padrão 30 dias)\n"
-    "/buscar termo - procura por código, nome ou máquina\n"
+    "/buscar termo (ou /busca) - procura por código, nome ou máquina\n"
     "/itens - lista todos os itens (código, nome e quantidade)\n"
-    "/entrada CODIGO QTD - dá entrada\n"
+    "/entrada CODIGO QTD [custo 3,50] - dá entrada (o custo é opcional)\n"
     "/saida CODIGO QTD - dá saída\n"
     "/ajuste CODIGO NOVO_SALDO - corrige o saldo para um valor exato\n"
     "/novo - cadastra item (digite /novo para ver o formato)"
@@ -211,17 +252,19 @@ def cmd_relatorio(empresa_id: str, args: str = "") -> str:
     return "\n".join(linhas)
 
 
-def cmd_buscar(empresa_id: str, args: str) -> str:
+def cmd_buscar(empresa_id: str, args: str, admin: bool = False) -> str:
     """
-    /buscar termo: procura por código, nome ou máquina. Primeiro tenta o texto exato; se não achar,
-    usa a busca por palavras (a mesma da IA), que entende 'fita 8kg' mesmo com 'branca 10mm' no meio.
+    /buscar termo (ou /busca): procura por código, nome ou máquina. Primeiro tenta o texto exato;
+    se não achar, usa a busca por palavras (a mesma da IA), que entende 'fita 8kg' mesmo com
+    'branca 10mm' no meio. Operador vê o formato simples; admin vê também custo unitário,
+    valor em estoque e última entrada.
     """
     if not args:
         return "Use: /buscar termo"
     achados = buscar_itens(empresa_id, args) or _achar_itens(todos_itens(empresa_id), args)
     if not achados:
         return f"Nada encontrado para '{args}'."
-    return "\n\n".join(formatar_item(i) for i in achados)
+    return texto_itens(empresa_id, achados, admin)
 
 
 def cmd_itens(empresa_id: str) -> str:
@@ -237,29 +280,26 @@ def cmd_itens(empresa_id: str) -> str:
 
 
 def cmd_movimentar(empresa_id: str, usuario_id: str, tipo: str, args: str) -> str:
-    """Serve para /entrada e /saida (muda só o tipo)."""
-    partes = args.split(maxsplit=2)  # CODIGO, QTD, observação (opcional)
+    """
+    Serve para /entrada e /saida (muda só o tipo). Na entrada, o custo é opcional:
+    /entrada FIT-001 50 custo 3,50. Quem grava e monta a resposta é o mesmo código das frases
+    livres (_executar_movimento, no cerebro.py), assim o comportamento é igual nos dois caminhos.
+    """
+    partes = args.split(maxsplit=2)  # CODIGO, QTD, observação e/ou custo (opcionais)
     if len(partes) < 2 or not partes[1].isdigit() or int(partes[1]) <= 0:
-        return f"Use: /{tipo} CODIGO QUANTIDADE   (ex: /{tipo} VLV-001 5)"
+        dica = "  ou com custo: /entrada VLV-001 5 custo 3,50" if tipo == "entrada" else ""
+        return f"Use: /{tipo} CODIGO QUANTIDADE   (ex: /{tipo} VLV-001 5){dica}"
 
     codigo, qtd = partes[0], int(partes[1])
-    obs = partes[2] if len(partes) > 2 else None
+    resto = partes[2] if len(partes) > 2 else ""
+    custo = None
+    if tipo == "entrada" and resto:
+        resto, custo = _extrair_custo(resto, tambem_no_inicio=True)   # o que sobrar vira a observação
 
-    item, erro = registrar_movimentacao(empresa_id, usuario_id, codigo, tipo, qtd, obs)
-    if erro:
-        return f"❌ {erro}"
-
-    verbo = "Entrada" if tipo == "entrada" else "Saída"
-    resposta = (
-        f"✅ {verbo} registrada: {qtd}x {item['nome']}\n"
-        f"Saldo atual: {item['quantidade']}"
-    )
-    if item["estoque_minimo"] > 0 and item["quantidade"] <= item["estoque_minimo"]:
-        resposta += (
-            f"\n⚠️ Atenção: abaixo do mínimo "
-            f"({item['estoque_minimo']}). Hora de repor!"
-        )
-    return resposta
+    dados = {"tipo": tipo, "codigo": codigo, "quantidade": qtd}
+    if custo:
+        dados["custo_unitario"] = custo
+    return _executar_movimento(empresa_id, usuario_id, resto, dados)
 
 
 def cmd_ajuste(empresa_id: str, usuario_id: str, args: str) -> str:
@@ -592,8 +632,8 @@ def _executar_comando_bruto(usuario: dict, texto: str) -> str:
             return cmd_baixo(empresa_id)
         if comando == "/relatorio":
             return cmd_relatorio(empresa_id, args)
-        if comando == "/buscar":
-            return cmd_buscar(empresa_id, args)
+        if comando in ("/buscar", "/busca"):
+            return cmd_buscar(empresa_id, args, admin=eh_admin(usuario))
         if comando == "/itens":
             return cmd_itens(empresa_id)
         if comando == "/entrada":
@@ -650,7 +690,8 @@ def processar_mensagem(telefone: str, texto: str) -> str:
 
     if not texto.startswith("/"):
         try:
-            return interpretar(empresa_id, usuario, texto, formatar_item,
+            return interpretar(empresa_id, usuario, texto,
+                               lambda itens: texto_itens(empresa_id, itens, eh_admin(usuario)),
                                lambda cmd, args="": executar_comando(usuario, f"{cmd} {args}".strip()))
         except Exception as erro:
             print("Erro na IA:", repr(erro))

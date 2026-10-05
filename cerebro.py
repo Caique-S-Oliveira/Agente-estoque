@@ -77,6 +77,7 @@ REGRAS
 10. AJUSTE: "o saldo da fita de 8 é 35", "acerta a correia para 8", "na verdade tem 35" = ajustar_saldo com o saldo FINAL. Não é entrada nem saída. O sistema pede a confirmação.
 11. RESUMOS: "como está o estoque", "o que está acabando", "relatório da semana/do mês", "histórico da fita" = ver_relatorio. Não escreva você os números.
 12. Escreva para WhatsApp: respostas curtas e sem markdown (nada de **negrito** ou #). Para destacar, use *um asterisco*.
+13. CUSTO NA ENTRADA: se, numa ENTRADA, o usuário disser o preço de compra POR UNIDADE ("custo 3,50", "a 3,50 cada", "R$ 3,50 a unidade"), preencha custo_unitario com esse número. Se for o valor TOTAL da compra, ou se não houver preço, NÃO preencha. Nunca preencha em saída.
 
 CATÁLOGO (código | nome)
 {catalogo}
@@ -95,6 +96,8 @@ FERRAMENTAS = [
                 "tipo": {"type": "string", "enum": ["entrada", "saida"]},
                 "codigo": {"type": "string", "description": "Código do item, igual ao do catálogo"},
                 "quantidade": {"type": "integer", "minimum": 1},
+                "custo_unitario": {"type": "number", "minimum": 0,
+                                   "description": "Só em ENTRADA e só se o usuário disse o preço de compra POR UNIDADE. Valor total da compra: não preencha."},
             },
             "required": ["tipo", "codigo", "quantidade"],
         },
@@ -265,6 +268,85 @@ def _achar_itens(itens: list, termo: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Custo na entrada: "entrou 50 caixa 20x20 custo 3,50"
+# O custo informado vira o custo do item (último custo) e, se mudou 5% ou mais, avisamos.
+# Tudo aqui é código comum: não gasta IA.
+# ---------------------------------------------------------------------------
+VARIACAO_CUSTO_ALERTA = 5.0      # a partir de quantos % de diferença o aviso de "subiu/caiu" aparece
+
+# Pedaços da expressão que reconhece o custo numa frase (maiúscula/minúscula e acento não importam):
+#   "custo 3,50" | "valor 3,50" | "preço 3,50" | "custo unitário R$ 3,50" | "R$ 3,50"  (+ "cada", "reais"...)
+_PREFIXO_CUSTO = (r"(?:\b(?:custo|custou|valor|pre[cç]o)\b(?:\s+(?:unit[aá]rio|por unidade|de))*\s*(?:r\$\s*)?"
+                  r"|r\$\s*)")
+_NUMERO_CUSTO = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
+_SUFIXO_CUSTO = r"(?:\s*(?:reais|cada|cada uma|por unidade|a unidade|un|/un))?"
+_RE_CUSTO_NO_FIM = re.compile(_PREFIXO_CUSTO + _NUMERO_CUSTO + _SUFIXO_CUSTO + r"\s*$", re.IGNORECASE)
+_RE_CUSTO_NO_INICIO = re.compile(r"^" + _PREFIXO_CUSTO + _NUMERO_CUSTO + _SUFIXO_CUSTO + r"(?=\s|$)", re.IGNORECASE)
+
+
+def _moeda(valor: float) -> str:
+    """Formata 1234.5 como R$ 1.234,50 (igual à do agente.py; fica aqui para não importar em círculo)."""
+    texto = f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {texto}"
+
+
+def _parse_preco(texto: str) -> float:
+    """'3,50' -> 3.5 | '3.50' -> 3.5 | '1.234,50' -> 1234.5 | '1.234' -> 1234 (ponto com 3 dígitos é milhar)."""
+    if "," in texto:
+        return float(texto.replace(".", "").replace(",", "."))
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+", texto):
+        return float(texto.replace(".", ""))
+    return float(texto)
+
+
+def _custo_valido(valor):
+    """Aceita só número maior que zero e até 1.000.000 (vale para o que vem da IA e do atalho). Senão, None."""
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        return None
+    if not 0 < valor <= 1_000_000:
+        return None
+    return round(float(valor), 2)
+
+
+def _extrair_custo(texto: str, tambem_no_inicio: bool = False):
+    """
+    Separa o custo da frase. Devolve (frase_sem_o_custo, custo) ou (texto, None) se não houver.
+    Frases livres trazem o custo no FIM ("entrou 50 caixa custo 3,50"). No comando /entrada ele
+    também pode vir logo depois da quantidade (tambem_no_inicio=True): "/entrada 0001 5 custo 3,50 nota 12".
+    A frase devolvida mantém maiúsculas e acentos (ela pode virar a observação do histórico).
+    """
+    texto = unicodedata.normalize("NFC", texto)
+    achou = _RE_CUSTO_NO_FIM.search(texto)
+    resto = texto[:achou.start()] if achou else None
+    if not achou and tambem_no_inicio:
+        achou = _RE_CUSTO_NO_INICIO.search(texto.strip())
+        resto = texto.strip()[achou.end():] if achou else None
+    if not achou:
+        return texto, None
+    custo = _custo_valido(_parse_preco(achou.group(1)))
+    if custo is None:
+        return texto, None
+    return resto.strip(), custo
+
+
+def _texto_variacao_custo(nome: str, antes, novo: float) -> str:
+    """
+    Linha que vai na resposta da entrada quando o custo foi informado: diz o que aconteceu com o
+    custo do item. Variação de 5% ou mais vira um alerta (📈 subiu / 📉 caiu).
+    """
+    if antes is None or antes <= 0:                      # item sem custo anterior: não há o que comparar
+        return f"💲 Custo registrado: {_moeda(novo)}"
+    if round(novo, 2) == round(antes, 2):
+        return f"💲 Custo mantido em {_moeda(novo)}"
+    pct = (novo - antes) / antes * 100
+    if abs(pct) >= VARIACAO_CUSTO_ALERTA:
+        seta, verbo = ("📈", "subiu") if pct > 0 else ("📉", "caiu")
+        pct_txt = f"{abs(pct):.1f}".replace(".", ",")
+        return f"{seta} Atenção: o custo de {nome} {verbo} {pct_txt}% (de {_moeda(antes)} para {_moeda(novo)})"
+    return f"💲 Custo atualizado para {_moeda(novo)} (era {_moeda(antes)})"
+
+
+# ---------------------------------------------------------------------------
 # Atalho sem IA: frases simples e inequívocas (custo zero, resultado sempre igual)
 # ---------------------------------------------------------------------------
 VERBOS_SAIDA = {"saiu", "sairam", "vendi", "vendeu", "vendemos", "baixa", "baixar", "baixei",
@@ -373,8 +455,12 @@ def _resolver_local(empresa_id: str, usuario_id: str, texto: str):
         por_codigo = [i for i in ofertados if _norm(i["codigo"]) in tokens]
         achados = por_codigo or _achar_itens(ofertados, " ".join(_palavras_do_item(tokens)))
         if len(achados) == 1:
-            return "mov", {"tipo": tipo, "codigo": achados[0]["codigo"], "quantidade": qtd}, \
-                f"{original} / {texto}"[:120]
+            pedido = {"tipo": tipo, "codigo": achados[0]["codigo"], "quantidade": qtd}
+            if tipo == "entrada":            # o custo foi dito na frase original, antes do "Qual deles?"
+                _, custo = _extrair_custo(original)
+                if custo:
+                    pedido["custo_unitario"] = custo
+            return "mov", pedido, f"{original} / {texto}"[:120]
         if len(achados) > 1:             # ainda em dúvida: pergunta de novo, só entre estes
             _incompletos[usuario_id] = (time.time(), tipo, qtd, [i["codigo"] for i in achados], original)
             return "perguntar", _pergunta_de_escolha(achados), None
@@ -383,14 +469,20 @@ def _resolver_local(empresa_id: str, usuario_id: str, texto: str):
     # Frase completa (ex.: 'saiu 2 fitas 8kg' ou 'ajusta fita 8kg para 150').
     # Um item combina -> executa. Vários -> pergunta qual. Nenhum/dúvida -> devolve None e a IA decide.
     # 2) Frase completa
-    analise = _analisar_frase(empresa_id, texto) or _analisar_ajuste(empresa_id, texto)
+    # Em frases de ENTRADA o custo pode vir no fim ("... custo 3,50"): separamos antes de analisar.
+    sem_custo, custo = (_extrair_custo(texto) if tokens and tokens[0] in VERBOS_ENTRADA else (texto, None))
+    analise = _analisar_frase(empresa_id, sem_custo) or _analisar_ajuste(empresa_id, sem_custo)
     if not analise:
         return None
     tipo, qtd, achados = analise
     if len(achados) == 1:
-        return "mov", {"tipo": tipo, "codigo": achados[0]["codigo"], "quantidade": qtd}, texto
+        pedido = {"tipo": tipo, "codigo": achados[0]["codigo"], "quantidade": qtd}
+        if custo and tipo == "entrada":
+            pedido["custo_unitario"] = custo
+        return "mov", pedido, texto
     if 2 <= len(achados) <= 8:           # ambiguidade: pergunta e guarda a quantidade
-        _incompletos[usuario_id] = (time.time(), tipo, qtd, [i["codigo"] for i in achados], texto[:100])
+        # a frase original (com o custo) fica guardada para recuperarmos o custo depois da escolha
+        _incompletos[usuario_id] = (time.time(), tipo, qtd, [i["codigo"] for i in achados], texto[:160])
         return "perguntar", _pergunta_de_escolha(achados), None
     return None
 
@@ -420,7 +512,11 @@ def _validar_movimento(empresa_id, dados):
         return None, None, f"❌ Não achei nenhum item com o código {codigo.upper()}."
     if tipo == "saida" and qtd > item["quantidade"]:     # impossível: nem pede confirmação
         return None, None, f"❌ Saldo insuficiente: {item['nome']} tem só {item['quantidade']} unidade(s)."
-    return {"tipo": tipo, "codigo": item["codigo"], "quantidade": qtd}, item, None
+    pedido = {"tipo": tipo, "codigo": item["codigo"], "quantidade": qtd}
+    custo = _custo_valido(dados.get("custo_unitario")) if tipo == "entrada" else None
+    if custo is not None:                                 # custo inválido (0, negativo, texto) é ignorado
+        pedido["custo_unitario"] = custo
+    return pedido, item, None
 
 
 def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
@@ -428,21 +524,32 @@ def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
     EXECUTA de verdade uma entrada ou saída (grava no banco). Só é chamada depois de
     _validar_movimento e, se for quantidade alta, depois do "sim". O texto original da pessoa
     vai para o histórico (até 120 letras) para podermos auditar se a IA entendeu errado.
+    Se a entrada trouxe o custo unitário, o custo do item passa a ser esse e a resposta diz se mudou.
     """
     tipo, codigo, qtd = dados.get("tipo"), dados.get("codigo"), dados.get("quantidade")
     if tipo not in ("entrada", "saida") or not isinstance(codigo, str) \
             or not isinstance(qtd, int) or isinstance(qtd, bool) or not (1 <= qtd <= 100000):
         return "❌ Não entendi esse pedido. Pode repetir com item e quantidade?"
 
+    custo = _custo_valido(dados.get("custo_unitario")) if tipo == "entrada" else None
+    custo_antes = None
+    if custo is not None:     # guarda o custo de ANTES, para comparar depois que o banco for atualizado
+        antes = buscar_item_por_codigo(empresa_id, codigo)
+        if antes is not None and antes.get("preco_custo") is not None:
+            custo_antes = float(antes["preco_custo"])
+
     # O texto original fica no histórico: ajuda a auditar se a IA entendeu errado
     item, erro = registrar_movimentacao(
-        empresa_id, usuario_id, codigo, tipo, qtd, observacao=texto_original[:120]
+        empresa_id, usuario_id, codigo, tipo, qtd, observacao=texto_original[:120] or None,
+        custo_unitario=custo,
     )
     if erro:
         return f"❌ {erro}"
 
     verbo = "Entrada" if tipo == "entrada" else "Saída"
     resp = f"✅ {verbo} registrada: {qtd}x {item['nome']}\nSaldo atual: {item['quantidade']}"
+    if custo is not None:
+        resp += "\n" + _texto_variacao_custo(item["nome"], custo_antes, custo)
     if item["estoque_minimo"] > 0 and item["quantidade"] <= item["estoque_minimo"]:
         resp += f"\n⚠️ Abaixo do mínimo ({item['estoque_minimo']}). Hora de repor!"
     return resp
@@ -512,10 +619,11 @@ def _executar_relatorio(dados, comando) -> str:
     return comando("/" + tipo, args)
 
 
-def _executar_consulta(empresa_id, dados, formatar_item) -> str:
+def _executar_consulta(empresa_id, dados, formatar_itens) -> str:
     """
     Ferramenta consultar_item: procura o item pelas palavras (busca do nosso código) e mostra
-    saldo e dados. Se nada combinar, avisa.
+    saldo e dados. Se nada combinar, avisa. Quem decide o formato (operador ou admin) é a função
+    formatar_itens, entregue pelo agente.py.
     """
     termo = str(dados.get("termo", "")).strip()
     if not termo:
@@ -523,7 +631,7 @@ def _executar_consulta(empresa_id, dados, formatar_item) -> str:
     achados = _achar_itens(todos_itens(empresa_id), termo)
     if not achados:
         return f"Não encontrei nada para '{termo}'."
-    return "\n\n".join(formatar_item(i) for i in achados)
+    return formatar_itens(achados)
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +738,8 @@ def _texto_confirmacao(grandes) -> str:
         elif pedido["tipo"] == "saida":
             linhas.append(f"• Saída: {q}x {item['nome']} (saldo {atual} → {atual - q})")
         else:
-            linhas.append(f"• Entrada: {q}x {item['nome']} (saldo {atual} → {atual + q})")
+            custo = f", custo {_moeda(pedido['custo_unitario'])}" if pedido.get("custo_unitario") else ""
+            linhas.append(f"• Entrada: {q}x {item['nome']} (saldo {atual} → {atual + q}{custo})")
     linhas.append("Responda *sim* para confirmar ou *não* para cancelar.")
     return "\n".join(linhas)
 
@@ -638,7 +747,7 @@ def _texto_confirmacao(grandes) -> str:
 # ---------------------------------------------------------------------------
 # Função principal, chamada pelo agente.py
 # ---------------------------------------------------------------------------
-def _interpretar_ia(empresa_id: str, usuario: dict, texto: str, formatar_item, comando=None) -> str:
+def _interpretar_ia(empresa_id: str, usuario: dict, texto: str, formatar_itens, comando=None) -> str:
     """
     Caminho com IA: usado quando o atalho local não resolve a frase. Passos: (1) confere o
     limite diário de mensagens com IA, (2) faz UMA chamada ao modelo, (3) registra os tokens
@@ -666,10 +775,10 @@ def _interpretar_ia(empresa_id: str, usuario: dict, texto: str, formatar_item, c
         print("Falha ao registrar uso da IA:", erro)
 
     fala_ia, pedidos = extrair(resposta)
-    return _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_item, comando)
+    return _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_itens, comando)
 
 
-def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_item, comando=None) -> str:
+def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_itens, comando=None) -> str:
     """Valida e executa os pedidos (vindos da IA ou do atalho local) e monta a resposta."""
     partes, grandes = [], []
     for nome, dados in pedidos:
@@ -682,9 +791,10 @@ def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_i
             elif pedido["tipo"] == "ajuste" or pedido["quantidade"] > QTD_CONFIRMAR_ACIMA_DE:
                 grandes.append((pedido, item))      # espera o "sim" do usuário
             else:
-                partes.append(_executar_movimento(empresa_id, usuario_id, texto, dados))
+                # usa o PEDIDO já validado (código normalizado e custo conferido), não o dado cru da IA
+                partes.append(_executar_movimento(empresa_id, usuario_id, texto, pedido))
         elif nome == "consultar_item":
-            partes.append(_executar_consulta(empresa_id, dados, formatar_item))
+            partes.append(_executar_consulta(empresa_id, dados, formatar_itens))
         elif nome == "cadastrar_item":
             partes.append(_executar_cadastro(empresa_id, dados, comando))
         elif nome == "ver_relatorio":
@@ -707,7 +817,7 @@ def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_i
     return resposta_final
 
 
-def interpretar(empresa_id: str, usuario: dict, texto: str, formatar_item, comando=None) -> str:
+def interpretar(empresa_id: str, usuario: dict, texto: str, formatar_itens, comando=None) -> str:
     """
     PORTA DE ENTRADA das mensagens sem barra (chamada pelo agente.py). Em volta da decisão
     (_interpretar_fluxo) ela lê o estado da conversa do banco e o grava de volta no fim.
@@ -715,12 +825,12 @@ def interpretar(empresa_id: str, usuario: dict, texto: str, formatar_item, coman
     usuario_id = usuario["id"]
     lido = _carregar_estado(empresa_id, usuario_id)
     try:
-        return _interpretar_fluxo(empresa_id, usuario, texto, formatar_item, comando)
+        return _interpretar_fluxo(empresa_id, usuario, texto, formatar_itens, comando)
     finally:
         _salvar_estado(empresa_id, usuario_id, lido)
 
 
-def _interpretar_fluxo(empresa_id: str, usuario: dict, texto: str, formatar_item, comando=None) -> str:
+def _interpretar_fluxo(empresa_id: str, usuario: dict, texto: str, formatar_itens, comando=None) -> str:
     """
     Decisão da mensagem. Ordem:
       1. Há uma confirmação pendente? "sim" executa, "não" cancela, outra frase cancela e segue.
@@ -754,8 +864,8 @@ def _interpretar_fluxo(empresa_id: str, usuario: dict, texto: str, formatar_item
         tipo_resp, valor, obs = local
         if tipo_resp == "mov":
             return aviso + _aplicar_pedidos(empresa_id, usuario_id, obs,
-                                            [("registrar_movimento", valor)], "", formatar_item, comando)
+                                            [("registrar_movimento", valor)], "", formatar_itens, comando)
         _lembrar(usuario_id, texto, valor)
         return aviso + valor
 
-    return aviso + _interpretar_ia(empresa_id, usuario, texto, formatar_item, comando)
+    return aviso + _interpretar_ia(empresa_id, usuario, texto, formatar_itens, comando)

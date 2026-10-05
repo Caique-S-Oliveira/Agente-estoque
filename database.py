@@ -170,9 +170,11 @@ def adicionar_item(empresa_id, usuario_id, codigo, nome, maquina, quantidade,
 
 def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: str,
                            quantidade: int, observacao: str = None,
-                           origem: str = "whatsapp"):
+                           origem: str = "whatsapp", custo_unitario: float = None):
     """
     Dá entrada ou saída em um item.
+    Se for ENTRADA e vier o custo unitário (preço pago por unidade nesta compra), ele é gravado
+    no histórico e passa a ser o custo do item (preco_custo = custo da última compra).
     Retorna (item_atualizado, mensagem_de_erro). Um dos dois é None.
     """
     item = buscar_item_por_codigo(empresa_id, codigo)
@@ -191,13 +193,19 @@ def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: 
                 f"{saldo_anterior} unidade(s)."
             )
 
-    # 1) Atualiza o saldo do item
+    # Só entrada tem custo de compra. Saída e ajuste ignoram o valor, mesmo que alguém mande.
+    usar_custo = tipo == "entrada" and custo_unitario is not None
+
+    # 1) Atualiza o saldo do item (e o custo, se esta entrada trouxe o preço pago)
+    dados_item = {
+        "quantidade": nova_qtd,
+        "atualizado_em": datetime.now(timezone.utc).isoformat(),
+    }
+    if usar_custo:
+        dados_item["preco_custo"] = custo_unitario
     resposta = (
         supabase.table("itens")
-        .update({
-            "quantidade": nova_qtd,
-            "atualizado_em": datetime.now(timezone.utc).isoformat(),
-        })
+        .update(dados_item)
         .eq("id", item["id"])
         .eq("empresa_id", empresa_id)
         .execute()
@@ -214,9 +222,40 @@ def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: 
         "saldo_novo": nova_qtd,
         "observacao": observacao,
         "origem": origem,
+        # a coluna custo_unitario nasce na migração 008; só é enviada quando há custo
+        **({"custo_unitario": custo_unitario} if usar_custo else {}),
     }).execute()
 
     return resposta.data[0], None
+
+
+def ultimas_entradas(empresa_id: str, item_ids: list):
+    """
+    Última ENTRADA de cada item da lista (para o /buscar do administrador).
+    Devolve {item_id: movimentação}. A carga inicial (estoque inicial/importação) não conta como
+    compra, então fica de fora. Itens sem nenhuma entrada real não aparecem no resultado.
+    """
+    if not item_ids:
+        return {}
+    movs = (
+        supabase.table("movimentacoes")
+        .select("*")
+        .eq("empresa_id", empresa_id)
+        .eq("tipo", "entrada")
+        .in_("item_id", list(item_ids))
+        .order("criado_em", desc=True)
+        .limit(1000)
+        .execute()
+        .data
+    )
+    ultimas = {}
+    for m in movs:                       # da mais recente para a mais antiga: vale a primeira de cada item
+        if m["item_id"] not in item_ids or m["item_id"] in ultimas:
+            continue
+        if m.get("observacao") == "Estoque inicial" or m.get("origem") == "importacao":
+            continue
+        ultimas[m["item_id"]] = m
+    return ultimas
 
 
 def ajustar_saldo(empresa_id: str, usuario_id: str, codigo: str, novo_saldo: int,
