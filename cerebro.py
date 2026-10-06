@@ -78,6 +78,7 @@ REGRAS
 11. RESUMOS: "como está o estoque", "o que está acabando", "relatório da semana/do mês", "histórico da fita" = ver_relatorio. Não escreva você os números.
 12. Escreva para WhatsApp: respostas curtas e sem markdown (nada de **negrito** ou #). Para destacar, use *um asterisco*.
 13. CUSTO NA ENTRADA: se, numa ENTRADA, o usuário disser o preço de compra POR UNIDADE ("custo 3,50", "a 3,50 cada", "R$ 3,50 a unidade"), preencha custo_unitario com esse número. Se for o valor TOTAL da compra, ou se não houver preço, NÃO preencha. Nunca preencha em saída.
+14. Você NÃO altera nada sozinho: só as ferramentas alteram o estoque. Nunca diga que ajustou, registrou ou cadastrou algo sem ter chamado a ferramenta. Se o pedido for ajuste, entrada ou saída e o item estiver claro, CHAME a ferramenta (o sistema pede a confirmação quando precisar).
 
 CATÁLOGO (código | nome)
 {catalogo}
@@ -407,15 +408,24 @@ def _analisar_frase(empresa_id: str, texto: str):
 
 
 def _analisar_ajuste(empresa_id: str, texto: str):
-    """Reconhece  AJUSTA + ITEM + PARA + NÚMERO.  Devolve ("ajuste", novo_saldo, itens) ou None."""
+    """
+    Reconhece  AJUSTA + ITEM + (PARA) + NÚMERO.  Devolve ("ajuste", novo_saldo, itens) ou None.
+    O "para" é opcional: "ajusta fita pet para 21" e "ajustar fita pet 21" valem. Ajuste SEMPRE
+    pede confirmação (mostra saldo de antes e de depois), então um erro de leitura não grava nada.
+    """
     if "?" in texto:
         return None
     tokens = _norm(texto).replace(",", " ").replace(".", " ").replace("!", " ").split()
-    if len(tokens) < 4 or tokens[0] not in VERBOS_AJUSTE:
+    if len(tokens) < 3 or tokens[0] not in VERBOS_AJUSTE:
         return None
-    if tokens[-2] not in ("para", "pra") or not re.fullmatch(r"\d{1,6}", tokens[-1]):
+    if not re.fullmatch(r"\d{1,6}", tokens[-1]):
         return None
-    palavras = _palavras_do_item([t for t in tokens[1:-2] if t not in SOLTAS_AJUSTE])
+    meio = tokens[1:-1]
+    if meio[-1] in ("para", "pra"):
+        meio = meio[:-1]
+    elif meio[-1] in ("de", "do", "da"):
+        return None          # "ajusta fita de 12": o 12 é parte do nome (peso), não o saldo: a IA decide
+    palavras = _palavras_do_item([t for t in meio if t not in SOLTAS_AJUSTE])
     if not palavras:
         return None
     return "ajuste", int(tokens[-1]), _achar_itens(todos_itens(empresa_id), " ".join(palavras))
@@ -778,6 +788,14 @@ def _interpretar_ia(empresa_id: str, usuario: dict, texto: str, formatar_itens, 
     return _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_itens, comando)
 
 
+# Frases em que a IA AFIRMA ter feito algo (texto já sem acento e em minúsculo, como _norm devolve).
+_RE_AFIRMA_ACAO = re.compile(
+    r"\b(?:ajustei|registrei|atualizei|cadastrei|anotei|removi|alterei|dei (?:entrada|baixa)"
+    r"|foi (?:ajustad|registrad|atualizad|cadastrad|removid|alterad)\w*"
+    r"|(?:ajustad|registrad|atualizad|cadastrad)[oa]s? (?:com sucesso|para))"
+)
+
+
 def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_itens, comando=None) -> str:
     """Valida e executa os pedidos (vindos da IA ou do atalho local) e monta a resposta."""
     partes, grandes = [], []
@@ -805,6 +823,14 @@ def _aplicar_pedidos(empresa_id, usuario_id, texto, pedidos, fala_ia, formatar_i
     if grandes:
         _pendentes[usuario_id] = (time.time(), [p for p, _ in grandes], texto)
         partes.append(_texto_confirmacao(grandes))
+
+    # Trava anti-mentira: se a IA SÓ escreveu texto (nenhuma ferramenta rodou) e esse texto afirma
+    # que algo foi feito ("ajustei", "foi ajustado para 21"), nada foi gravado. Em vez de repetir
+    # a afirmação falsa, avisamos que nada mudou e ensinamos a frase certa.
+    if fala_ia and not partes and not grandes and _RE_AFIRMA_ACAO.search(_norm(fala_ia)):
+        fala_ia = ("⚠️ Não executei nenhuma ação: nada foi alterado no estoque.\n"
+                   "Para ajustar um saldo escreva: ajusta fita pet para 21 (ou /ajuste CODIGO 21).\n"
+                   "Para entrada ou saída: entrou 5 fita pet / saiu 2 fita pet.")
 
     # A fala da IA só entra quando é uma pergunta/explicação (confirmações são nossas)
     # O texto da IA só entra se for uma pergunta ou se não houve nenhuma ação. Confirmações
