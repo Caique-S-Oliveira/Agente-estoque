@@ -6,7 +6,8 @@ MAPA DO ARQUIVO (de cima para baixo):
   2. normalizar_telefone() -> ajusta o 9 extra dos celulares brasileiros
   3. _tratar_mensagem()    -> o que fazer com UMA mensagem (anti-duplicidade, texto, áudio, resposta)
   4. _limpeza_diaria()     -> apaga IDs de mensagens antigas (1 vez por dia)
-  5. Rotas: GET /, POST /teste (desligada por padrão), GET /webhook (verificação), POST /webhook (mensagens)
+  5. Rotas: GET /, POST /teste (desligada por padrão), /cron/resumo (resumo da manhã, protegida por senha),
+     GET /webhook (verificação), POST /webhook (mensagens)
 """
 import hashlib
 import hmac
@@ -14,11 +15,12 @@ import json
 import os
 import time
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 import database
+import resumo
 from agente import processar_mensagem
 from config import META_APP_SECRET, VERIFY_TOKEN
 from whatsapp import enviar_mensagem
@@ -30,6 +32,10 @@ if not META_APP_SECRET:
 # O endereço /teste processa mensagens SEM conferir quem mandou. Só liga se você pedir no .env
 # (ENDPOINT_TESTE=1). No servidor de verdade, deixe desligado.
 ENDPOINT_TESTE = os.getenv("ENDPOINT_TESTE") == "1"
+
+# Senha do chamador externo (cron-job.org) que dispara o resumo da manhã em /cron/resumo.
+# Sem CRON_TOKEN definido (no .env ou no Render), a rota fica desligada (responde 404).
+CRON_TOKEN = os.getenv("CRON_TOKEN", "")
 
 app = FastAPI(title="Agente de Estoque")
 
@@ -66,6 +72,17 @@ def normalizar_telefone(telefone: str) -> str:
     return telefone
 
 
+def texto_de_botao(msg: dict):
+    """
+    Quando alguém toca num botão de resposta rápida de um MODELO de mensagem (ex.: "Ver resumo", do
+    resumo da manhã), a Meta manda uma mensagem do tipo "button". Devolve o comando que esse botão
+    representa ("/resumo") ou None se não for um botão que conhecemos.
+    """
+    botao = msg.get("button") or {}
+    texto = f"{botao.get('text', '')} {botao.get('payload', '')}".lower()
+    return "/resumo" if "resumo" in texto else None
+
+
 # ---------------------------------------------------------------- 3) uma mensagem
 def _tratar_mensagem(msg: dict):
     """
@@ -91,6 +108,8 @@ def _tratar_mensagem(msg: dict):
         if msg.get("type") == "text":
             telefone = normalizar_telefone(telefone_original)
             resposta = processar_mensagem(telefone, msg["text"]["body"])
+        elif msg.get("type") == "button" and texto_de_botao(msg):
+            resposta = processar_mensagem(normalizar_telefone(telefone_original), texto_de_botao(msg))
         elif msg.get("type") == "audio":
             resposta = "🎤 Ainda não entendo áudios. Por favor, escreva a mensagem."
         else:
@@ -131,6 +150,20 @@ def teste(mensagem: MensagemEntrada):
         raise HTTPException(status_code=404)
     resposta = processar_mensagem(mensagem.telefone, mensagem.texto)
     return {"resposta": resposta}
+
+
+# O cron-job.org chama este endereço de manhã (seg a sáb) para enviar o resumo ao dono.
+# Senha: cabeçalho X-Cron-Token (preferido) ou ?token= na URL. ?forcar=1 ignora domingo e a trava
+# de "já enviado hoje" (só para testar). O envio roda em segundo plano: a resposta é imediata.
+@app.api_route("/cron/resumo", methods=["GET", "POST"])
+async def cron_resumo(request: Request, tarefas: BackgroundTasks, forcar: int = 0):
+    if not CRON_TOKEN:
+        raise HTTPException(status_code=404)
+    informado = request.headers.get("X-Cron-Token") or request.query_params.get("token")
+    if not resumo.token_valido(informado, CRON_TOKEN):
+        return Response(content="Token inválido", status_code=403)
+    tarefas.add_task(resumo.enviar_resumos, None, bool(forcar))
+    return {"status": "agendado"}
 
 
 # A Meta chama este endereço UMA vez para verificar que o servidor é seu

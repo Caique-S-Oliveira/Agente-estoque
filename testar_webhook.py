@@ -89,8 +89,32 @@ with patch.object(main, "processar_mensagem", side_effect=lambda t, x: "resp:" +
     zerar(); r = postar(envio({"id": "T6", "from": TEL, "type": "audio"}))
     checar(cerebro.call_count == 0 and zap.call_count == 1, "áudio: resposta educada, sem gastar IA")
 
+    zerar(); r = postar(envio({"id": "T7", "from": TEL, "type": "button", "button": {"text": "Ver resumo", "payload": "Ver resumo"}}))
+    checar(cerebro.call_count == 1 and cerebro.call_args[0][1] == "/resumo" and zap.call_count == 1,
+           "botão 'Ver resumo' do modelo da manhã: vira o comando /resumo")
+
+    zerar(); r = postar(envio({"id": "T8", "from": TEL, "type": "button", "button": {"text": "Outro", "payload": "x"}}))
+    checar(cerebro.call_count == 0 and zap.call_count == 1, "botão desconhecido: resposta educada, sem gastar IA")
+
     zerar(); r = cliente.post("/teste", json={"telefone": TEL, "texto": "oi"})
     checar(r.status_code == 404 or main.ENDPOINT_TESTE, "/teste desligado no servidor (404)")
+
+# --- rota do resumo da manhã (/cron/resumo): protegida por senha, o envio em si é mockado
+with patch.object(main.resumo, "enviar_resumos") as envia:
+    with patch.object(main, "CRON_TOKEN", ""):
+        r = cliente.get("/cron/resumo", headers={"X-Cron-Token": "qualquer"})
+        checar(r.status_code == 404 and envia.call_count == 0, "sem CRON_TOKEN configurado: rota desligada (404)")
+    with patch.object(main, "CRON_TOKEN", "segredo"):
+        r = cliente.get("/cron/resumo")
+        checar(r.status_code == 403 and envia.call_count == 0, "cron sem senha: recusado (403)")
+        r = cliente.get("/cron/resumo", headers={"X-Cron-Token": "errada"})
+        checar(r.status_code == 403 and envia.call_count == 0, "cron com senha errada: recusado (403)")
+        r = cliente.post("/cron/resumo", headers={"X-Cron-Token": "segredo"})
+        checar(r.status_code == 200 and envia.call_count == 1 and envia.call_args[0] == (None, False),
+               "cron com a senha certa (cabeçalho): agenda o envio do resumo")
+        envia.reset_mock(); r = cliente.get("/cron/resumo", params={"token": "segredo", "forcar": 1})
+        checar(r.status_code == 200 and envia.call_count == 1 and envia.call_args[0] == (None, True),
+               "cron com a senha na URL e forcar=1: envia ignorando domingo e 'já enviado'")
 
 r = cliente.get("/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "errado", "hub.challenge": "1"})
 checar(r.status_code == 403, "verificação com token errado: recusada")

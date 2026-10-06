@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 TABELAS_DE_EMPRESA = {"itens", "movimentacoes", "usuarios", "mensagens", "uso_ia",
-                      "estado_conversa", "auditoria"}
+                      "estado_conversa", "auditoria", "resumos_enviados"}
 # Funções que de propósito NÃO recebem empresa_id (e por quê):
 EXCECOES = {
     "usuario_autorizado": "descobre a empresa a partir do telefone de quem escreveu",

@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
 from config import MARGEM_SUGERIDA, PRECO_IA_ENTRADA_USD, PRECO_IA_SAIDA_USD
 from cerebro import interpretar, cancelar_pendente, _achar_itens, _executar_movimento, _extrair_custo
+from resumo import montar_resumo
 from database import (
     ultimas_entradas,
     usuario_autorizado, salvar_mensagem,
@@ -18,7 +19,7 @@ from database import (
 FUSO_BRASILIA = timezone(timedelta(hours=-3))
 
 # Comandos que só administradores podem usar
-COMANDOS_ADMIN = {"/historico", "/usuarios", "/desativar", "/reativar", "/remover", "/uso", "/editar"}
+COMANDOS_ADMIN = {"/historico", "/usuarios", "/desativar", "/reativar", "/remover", "/uso", "/editar", "/resumo"}
 
 
 def eh_admin(usuario: dict) -> bool:
@@ -136,7 +137,8 @@ AJUDA_ADMIN = (
     "/desativar NOME - bloqueia o acesso de uma pessoa\n"
     "/reativar NOME - devolve o acesso\n"
     "/remover CODIGO - apaga item cadastrado por engano (só se nunca movimentado)\n"
-    "/uso - quanto a IA gastou nos últimos 30 dias"
+    "/uso - quanto a IA gastou nos últimos 30 dias\n"
+    "/resumo - resumo da manhã agora (estoque baixo, movimentos de ontem, itens parados)"
 )
 
 
@@ -652,6 +654,8 @@ def _executar_comando_bruto(usuario: dict, texto: str) -> str:
             return cmd_ativar_desativar(empresa_id, usuario, args, ativar=True)
         if comando == "/uso":
             return cmd_uso(empresa_id)
+        if comando == "/resumo":
+            return montar_resumo(empresa_id)
         if comando == "/ajuste":
             return cmd_ajuste(empresa_id, usuario_id, args)
         if comando == "/novo":

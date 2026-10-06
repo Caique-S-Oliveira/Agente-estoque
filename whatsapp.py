@@ -28,34 +28,67 @@ def _partir_texto(texto: str, limite: int = LIMITE_CARACTERES) -> list:
     return partes or [""]
 
 
-def _enviar_uma(telefone: str, texto: str) -> bool:
-    """Envia UMA mensagem de texto pelo WhatsApp. Devolve True se a Meta aceitou."""
-
-    # Endereço da API da Meta. O PHONE_NUMBER_ID diz de qual número a mensagem sai.
+def _postar(corpo: dict):
+    """
+    Envia UM pedido à API da Meta. Devolve (deu_certo, codigo_do_erro).
+    O PHONE_NUMBER_ID diz de qual número a mensagem sai e o token é o "crachá" de permissão.
+    O código do erro (ex.: 131047 = passou de 24 h sem o cliente escrever) deixa o chamador decidir
+    o que fazer; é None quando deu certo ou quando nem chegamos a falar com a Meta.
+    """
     url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
-
-    # O "crachá" que prova que você tem permissão para enviar
     cabecalho = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-
-    # O conteúdo da mensagem, no formato que a Meta exige
-    corpo = {
-        "messaging_product": "whatsapp",
-        "to": telefone,
-        "type": "text",
-        "text": {"body": texto},
-    }
 
     try:
         resposta = httpx.post(url, headers=cabecalho, json=corpo, timeout=15)
     except httpx.HTTPError as erro:          # sem internet, tempo esgotado etc.
         print("Erro ao enviar (conexão):", repr(erro))
-        return False
+        return False, None
+
+    if resposta.status_code == 200:
+        return True, None
 
     # Se a Meta recusar, mostra o motivo no terminal (ajuda a depurar)
-    if resposta.status_code != 200:
-        print("Erro ao enviar:", resposta.status_code, resposta.text)
+    print("Erro ao enviar:", resposta.status_code, resposta.text)
+    try:
+        codigo = resposta.json().get("error", {}).get("code")
+    except ValueError:
+        codigo = None
+    return False, codigo
 
-    return resposta.status_code == 200
+
+def enviar_texto_detalhado(telefone: str, texto: str):
+    """Envia UM texto e devolve (deu_certo, codigo_do_erro). Usada pelo resumo da manhã."""
+    return _postar({
+        "messaging_product": "whatsapp",
+        "to": telefone,
+        "type": "text",
+        "text": {"body": texto},
+    })
+
+
+def enviar_template(telefone: str, nome_template: str, parametros: list, idioma: str = "pt_BR"):
+    """
+    Envia um MODELO de mensagem aprovado pela Meta (necessário para falar com alguém que não
+    escreveu nas últimas 24 h). `parametros` preenche, na ordem, as variáveis {{1}}, {{2}}... do
+    modelo. Devolve (deu_certo, codigo_do_erro).
+    """
+    corpo = {
+        "messaging_product": "whatsapp",
+        "to": telefone,
+        "type": "template",
+        "template": {"name": nome_template, "language": {"code": idioma}},
+    }
+    if parametros:
+        corpo["template"]["components"] = [{
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(p)} for p in parametros],
+        }]
+    return _postar(corpo)
+
+
+def _enviar_uma(telefone: str, texto: str) -> bool:
+    """Envia UMA mensagem de texto pelo WhatsApp. Devolve True se a Meta aceitou."""
+    return enviar_texto_detalhado(telefone, texto)[0]
 
 
 def enviar_mensagem(telefone: str, texto: str) -> bool:

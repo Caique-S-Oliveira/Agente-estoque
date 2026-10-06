@@ -170,11 +170,14 @@ def adicionar_item(empresa_id, usuario_id, codigo, nome, maquina, quantidade,
 
 def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: str,
                            quantidade: int, observacao: str = None,
-                           origem: str = "whatsapp", custo_unitario: float = None):
+                           origem: str = "whatsapp", custo_unitario: float = None,
+                           valor_venda_unitario: float = None):
     """
     Dá entrada ou saída em um item.
     Se for ENTRADA e vier o custo unitário (preço pago por unidade nesta compra), ele é gravado
     no histórico e passa a ser o custo do item (preco_custo = custo da última compra).
+    Se for SAÍDA e vier o valor de venda unitário, ele é gravado no histórico (base do faturamento),
+    junto com o custo que o item tinha na hora (base do lucro).
     Retorna (item_atualizado, mensagem_de_erro). Um dos dois é None.
     """
     item = buscar_item_por_codigo(empresa_id, codigo)
@@ -195,6 +198,16 @@ def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: 
 
     # Só entrada tem custo de compra. Saída e ajuste ignoram o valor, mesmo que alguém mande.
     usar_custo = tipo == "entrada" and custo_unitario is not None
+    usar_venda = tipo == "saida" and valor_venda_unitario is not None
+
+    # Campos extras do histórico (colunas das migrações 008 e 009): só são enviados quando há valor,
+    # assim movimentações comuns continuam iguais e não dependem das colunas novas.
+    extras = {}
+    if usar_custo:
+        extras["custo_unitario"] = custo_unitario
+    if usar_venda:
+        extras["valor_venda_unitario"] = valor_venda_unitario
+        extras["custo_unitario"] = float(item["preco_custo"])   # custo do item na hora da venda
 
     # 1) Atualiza o saldo do item (e o custo, se esta entrada trouxe o preço pago)
     dados_item = {
@@ -222,8 +235,7 @@ def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: 
         "saldo_novo": nova_qtd,
         "observacao": observacao,
         "origem": origem,
-        # a coluna custo_unitario nasce na migração 008; só é enviada quando há custo
-        **({"custo_unitario": custo_unitario} if usar_custo else {}),
+        **extras,
     }).execute()
 
     return resposta.data[0], None
@@ -545,3 +557,34 @@ def limite_ia_da_empresa(empresa_id: str, padrao: int) -> int:
         return valor if isinstance(valor, int) and not isinstance(valor, bool) and valor >= 0 else padrao
     except Exception:
         return padrao
+
+
+# =========================================
+# RESUMO DIÁRIO DA MANHÃ
+# =========================================
+
+def empresas_ativas():
+    """Empresas com a conta ativa (o resumo da manhã é enviado para cada uma)."""
+    return supabase.table("empresas").select("id,nome").eq("ativa", True).execute().data
+
+
+def reservar_envio_resumo(empresa_id: str, dia: str) -> bool:
+    """
+    Garante UM resumo por empresa por dia. Tenta gravar (empresa, dia): se for novo, devolve True
+    (pode enviar). Se já existia, devolve False. A chave única do banco decide, então funciona mesmo
+    que dois pedidos cheguem ao mesmo tempo.
+    """
+    try:
+        supabase.table("resumos_enviados").insert({"empresa_id": empresa_id, "dia": dia}).execute()
+        return True
+    except Exception as erro:
+        texto = str(erro).lower()
+        if "23505" in texto or "duplicate" in texto:
+            return False
+        raise
+
+
+def liberar_envio_resumo(empresa_id: str, dia: str):
+    """Desfaz a reserva do dia (usada quando o envio falhou para todos, para permitir nova tentativa)."""
+    supabase.table("resumos_enviados").delete().eq("empresa_id", empresa_id).eq("dia", dia).execute()
+
