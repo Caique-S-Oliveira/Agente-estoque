@@ -58,7 +58,7 @@ def periodo_de_referencia(hoje):
 
 
 # ---------------------------------------------------------------- 2) dados e texto
-def dados_resumo(empresa_id: str, agora=None) -> dict:
+def dados_resumo(empresa_id: str, agora=None, manha: bool = True) -> dict:
     """
     Consulta o banco (2 consultas) e monta o texto do resumo. Devolve
     {"texto": ..., "qtd_baixo": quantos itens estão abaixo do mínimo}.
@@ -92,7 +92,8 @@ def dados_resumo(empresa_id: str, agora=None) -> dict:
     parados = [i for i in itens
                if i["quantidade"] > 0 and datetime.fromisoformat(i["atualizado_em"]) < limite]
 
-    linhas = [f"☀️ Bom dia! Resumo de estoque — {_rotulo_dia(hoje)}", ""]
+    titulo = "☀️ Bom dia! Resumo de estoque" if manha else "📊 Resumo de estoque"
+    linhas = [f"{titulo} — {_rotulo_dia(hoje)}", ""]
 
     if baixos:
         linhas.append(f"⚠️ Estoque baixo: {len(baixos)} {'item' if len(baixos) == 1 else 'itens'}")
@@ -132,8 +133,9 @@ def dados_resumo(empresa_id: str, agora=None) -> dict:
 
 # ---------------------------------------------------------------- 3) só o texto
 def montar_resumo(empresa_id: str, agora=None) -> str:
-    """Só o texto do resumo. É o que o comando /resumo (admin) devolve."""
-    return dados_resumo(empresa_id, agora)["texto"]
+    """Só o texto do resumo. É o que o comando /resumo (admin) devolve, sem o "Bom dia"
+    (o comando pode ser usado a qualquer hora; o "Bom dia" fica só no envio automático)."""
+    return dados_resumo(empresa_id, agora, manha=False)["texto"]
 
 
 # ---------------------------------------------------------------- 4) envio
