@@ -275,14 +275,26 @@ def _achar_itens(itens: list, termo: str) -> list:
 # ---------------------------------------------------------------------------
 VARIACAO_CUSTO_ALERTA = 5.0      # a partir de quantos % de diferença o aviso de "subiu/caiu" aparece
 
-# Pedaços da expressão que reconhece o custo numa frase (maiúscula/minúscula e acento não importam):
-#   "custo 3,50" | "valor 3,50" | "preço 3,50" | "custo unitário R$ 3,50" | "R$ 3,50"  (+ "cada", "reais"...)
-_PREFIXO_CUSTO = (r"(?:\b(?:custo|custou|valor|pre[cç]o)\b(?:\s+(?:unit[aá]rio|por unidade|de))*\s*(?:r\$\s*)?"
-                  r"|r\$\s*)")
-_NUMERO_CUSTO = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
-_SUFIXO_CUSTO = r"(?:\s*(?:reais|cada|cada uma|por unidade|a unidade|un|/un))?"
-_RE_CUSTO_NO_FIM = re.compile(_PREFIXO_CUSTO + _NUMERO_CUSTO + _SUFIXO_CUSTO + r"\s*$", re.IGNORECASE)
-_RE_CUSTO_NO_INICIO = re.compile(r"^" + _PREFIXO_CUSTO + _NUMERO_CUSTO + _SUFIXO_CUSTO + r"(?=\s|$)", re.IGNORECASE)
+# Pedaços da expressão que reconhece um valor no fim da frase (maiúscula/minúscula e acento não importam).
+# O valor é SEMPRE por unidade. As palavras que o anunciam dependem do tipo:
+#   entrada (custo de compra):  "custo 3,50" | "valor 3,50" | "preço 3,50" | "por 3,50" | "R$ 3,50"
+#   saída (valor de venda):     "venda 330"  | "valor 330"  | "preço 330"  | "por 330"  | "R$ 330"
+# (+ "cada", "reais" no fim). "8kg", "10mm" etc. nunca são lidos como valor.
+_NUMERO_VALOR = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
+_SUFIXO_VALOR = r"(?:\s*(?:reais|cada|cada uma|por unidade|a unidade|un|/un))?"
+PALAVRAS_VALOR = {"entrada": "custo|custou|valor|pre[cç]o|por", "saida": "venda|valor|pre[cç]o|por"}
+CAMPO_VALOR = {"entrada": "custo_unitario", "saida": "valor_venda_unitario"}   # onde o valor mora no pedido
+
+
+def _montar_regex_valor(palavras: str):
+    """Monta as duas expressões (valor no FIM da frase, valor logo no INÍCIO do que sobra do comando)."""
+    prefixo = (rf"(?:\b(?:{palavras})\b(?:\s+(?:unit[aá]rio|por unidade|de))*\s*(?:r\$\s*)?|r\$\s*)")
+    fim = re.compile(prefixo + _NUMERO_VALOR + _SUFIXO_VALOR + r"\s*$", re.IGNORECASE)
+    inicio = re.compile(r"^" + prefixo + _NUMERO_VALOR + _SUFIXO_VALOR + r"(?=\s|$)", re.IGNORECASE)
+    return fim, inicio
+
+
+_REGEX_VALOR = {tipo: _montar_regex_valor(p) for tipo, p in PALAVRAS_VALOR.items()}
 
 
 def _moeda(valor: float) -> str:
@@ -309,25 +321,34 @@ def _custo_valido(valor):
     return round(float(valor), 2)
 
 
-def _extrair_custo(texto: str, tambem_no_inicio: bool = False):
+def _extrair_valor(texto: str, tipo: str, tambem_no_inicio: bool = False):
     """
-    Separa o custo da frase. Devolve (frase_sem_o_custo, custo) ou (texto, None) se não houver.
-    Frases livres trazem o custo no FIM ("entrou 50 caixa custo 3,50"). No comando /entrada ele
-    também pode vir logo depois da quantidade (tambem_no_inicio=True): "/entrada 0001 5 custo 3,50 nota 12".
+    Separa o valor unitário da frase. tipo "entrada" = custo de compra, "saida" = valor de venda.
+    Devolve (frase_sem_o_valor, valor) ou (texto, None) se não houver.
+    Frases livres trazem o valor no FIM ("saiu 2 fitas pet por 330"). No comando /entrada e /saida ele
+    também pode vir logo depois da quantidade (tambem_no_inicio=True): "/saida 0001 2 valor 330 nota 12".
     A frase devolvida mantém maiúsculas e acentos (ela pode virar a observação do histórico).
     """
+    if tipo not in _REGEX_VALOR:
+        return texto, None
     texto = unicodedata.normalize("NFC", texto)
-    achou = _RE_CUSTO_NO_FIM.search(texto)
+    re_fim, re_inicio = _REGEX_VALOR[tipo]
+    achou = re_fim.search(texto)
     resto = texto[:achou.start()] if achou else None
     if not achou and tambem_no_inicio:
-        achou = _RE_CUSTO_NO_INICIO.search(texto.strip())
+        achou = re_inicio.search(texto.strip())
         resto = texto.strip()[achou.end():] if achou else None
     if not achou:
         return texto, None
-    custo = _custo_valido(_parse_preco(achou.group(1)))
-    if custo is None:
+    valor = _custo_valido(_parse_preco(achou.group(1)))
+    if valor is None:
         return texto, None
-    return resto.strip(), custo
+    return resto.strip(), valor
+
+
+def _extrair_custo(texto: str, tambem_no_inicio: bool = False):
+    """Atalho do _extrair_valor para o custo de uma ENTRADA (mantido por compatibilidade)."""
+    return _extrair_valor(texto, "entrada", tambem_no_inicio)
 
 
 def _texto_variacao_custo(nome: str, antes, novo: float) -> str:
@@ -529,6 +550,19 @@ def _validar_movimento(empresa_id, dados):
     return pedido, item, None
 
 
+def _aviso_minimo(item) -> str:
+    """
+    Aviso de estoque baixo que vai colado na resposta (entrada, saída e ajuste). Não usa IA e
+    aparece na hora, para quem acabou de mexer no item. Sem mínimo cadastrado (0), não avisa.
+    """
+    minimo = item["estoque_minimo"]
+    if minimo <= 0 or item["quantidade"] > minimo:
+        return ""
+    if item["quantidade"] == 0:
+        return f"\n🚨 {item['nome']} ZEROU (mínimo {minimo}). Hora de repor!"
+    return f"\n⚠️ {item['nome']} ficou com {item['quantidade']} (mínimo {minimo}). Hora de repor!"
+
+
 def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
     """
     EXECUTA de verdade uma entrada ou saída (grava no banco). Só é chamada depois de
@@ -560,9 +594,7 @@ def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
     resp = f"✅ {verbo} registrada: {qtd}x {item['nome']}\nSaldo atual: {item['quantidade']}"
     if custo is not None:
         resp += "\n" + _texto_variacao_custo(item["nome"], custo_antes, custo)
-    if item["estoque_minimo"] > 0 and item["quantidade"] <= item["estoque_minimo"]:
-        resp += f"\n⚠️ Abaixo do mínimo ({item['estoque_minimo']}). Hora de repor!"
-    return resp
+    return resp + _aviso_minimo(item)
 
 
 def _executar_pedido(empresa_id, usuario_id, texto_original, pedido) -> str:
@@ -574,7 +606,8 @@ def _executar_pedido(empresa_id, usuario_id, texto_original, pedido) -> str:
                                texto_original[:120])
     if erro:
         return f"❌ {erro}"
-    return f"✅ Saldo ajustado: {item['nome']}\nDe {antes['quantidade'] if antes else '?'} para {item['quantidade']}"
+    return (f"✅ Saldo ajustado: {item['nome']}\nDe {antes['quantidade'] if antes else '?'} para {item['quantidade']}"
+            + _aviso_minimo(item))
 
 
 def _texto_limpo(valor) -> str:
