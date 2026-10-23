@@ -17,6 +17,10 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 
+# O token de verificação do webhook é obrigatório: sem ele a rota GET /webhook daria erro 500.
+if not VERIFY_TOKEN:
+    raise ValueError("Faltou preencher VERIFY_TOKEN no arquivo .env (o mesmo configurado no painel da Meta)")
+
 # --- Regras de negócio ---
 # Margem sobre o custo para o valor sugerido de venda (0.30 = 30%)
 MARGEM_SUGERIDA = 0.30

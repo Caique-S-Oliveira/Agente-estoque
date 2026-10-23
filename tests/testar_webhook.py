@@ -118,6 +118,16 @@ with patch.object(main.resumo, "enviar_resumos") as envia:
 
 r = cliente.get("/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "errado", "hub.challenge": "1"})
 checar(r.status_code == 403, "verificação com token errado: recusada")
+
+# --- endurecimento da auditoria de segurança
+r = cliente.post("/webhook", content=b"x" * (main.LIMITE_CORPO_BYTES + 1), headers={"X-Hub-Signature-256": "sha256=0"})
+checar(r.status_code == 413, "webhook com corpo gigante: recusado (413) antes de processar")
+checar(cliente.get("/openapi.json").status_code == 404 and cliente.get("/docs").status_code == 404,
+       "/docs e /openapi.json desligados por padrão (404)")
+from app.whatsapp import _mascarar_telefones
+mascarado = _mascarar_telefones('{"error":{"message":"(#131030) Recipient 5511949188851 not in allowed list"}}')
+checar("5511949188851" not in mascarado and "8851" in mascarado, "log de erro da Meta: telefone mascarado")
+
 r = cliente.get("/")
 checar(r.json() == {"status": "online"}, "página inicial online")
 

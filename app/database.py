@@ -65,7 +65,8 @@ def buscar_item_por_codigo(empresa_id: str, codigo: str):
 
 def buscar_itens(empresa_id: str, termo: str):
     """Procura itens cujo código, nome ou máquina contenham o termo."""
-    for ch in [",", "(", ")"]:
+    # Caracteres com sentido na sintaxe de filtros do PostgREST: viram espaço para não alterar o filtro
+    for ch in [",", "(", ")", '"', "\\", "*"]:
         termo = termo.replace(ch, " ")
     termo = termo.strip()
 

@@ -23,6 +23,9 @@ from app import database
 from app import resumo
 from app.agente import processar_mensagem
 from app.config import META_APP_SECRET, VERIFY_TOKEN
+
+# Corpo máximo aceito no webhook (a Meta manda poucos KB). Evita ler payloads gigantes.
+LIMITE_CORPO_BYTES = 1_000_000
 from app.whatsapp import enviar_mensagem
 
 # Sem o App Secret não dá para conferir a assinatura: melhor nem ligar o servidor do que ficar aberto.
@@ -37,7 +40,15 @@ ENDPOINT_TESTE = os.getenv("ENDPOINT_TESTE") == "1"
 # Sem CRON_TOKEN definido (no .env ou no Render), a rota fica desligada (responde 404).
 CRON_TOKEN = os.getenv("CRON_TOKEN", "")
 
-app = FastAPI(title="Agente de Estoque")
+# Sem /docs, /redoc e /openapi.json: é uma API só para a Meta e o cron, não precisa expor o mapa das rotas.
+# Para ver a documentação no seu computador, rode com EXPOR_DOCS=1 no .env.
+_docs = os.getenv("EXPOR_DOCS") == "1"
+app = FastAPI(
+    title="Agente de Estoque",
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
 
 
 class MensagemEntrada(BaseModel):
@@ -181,7 +192,14 @@ def verificar_webhook(
 # A Meta chama este endereço a cada mensagem recebida
 @app.post("/webhook")
 async def receber_webhook(request: Request):
+    # Recusa corpo gigante antes de ler (o tamanho declarado) e depois de ler (o tamanho real)
+    tamanho = request.headers.get("content-length", "")
+    if tamanho.isdigit() and int(tamanho) > LIMITE_CORPO_BYTES:
+        return Response(content="Corpo grande demais", status_code=413)
     corpo = await request.body()          # bytes EXATOS: a assinatura é calculada sobre eles
+
+    if len(corpo) > LIMITE_CORPO_BYTES:
+        return Response(content="Corpo grande demais", status_code=413)
 
     if not assinatura_valida(corpo, request.headers.get("X-Hub-Signature-256")):
         print("⛔ Webhook recusado: assinatura inválida ou ausente.")

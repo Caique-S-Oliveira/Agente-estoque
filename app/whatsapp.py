@@ -1,8 +1,15 @@
+import re
+
 import httpx
 from app.config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
 
 # O WhatsApp recusa mensagens com mais de 4096 caracteres. Ficamos abaixo, com folga.
 LIMITE_CARACTERES = 4000
+
+
+def _mascarar_telefones(texto: str) -> str:
+    """Esconde números de telefone (10+ dígitos) em textos de log, deixando só os 4 últimos."""
+    return re.sub(r"\d{6,}(\d{4})", lambda m: "****" + m.group(1), texto)
 
 
 def _partir_texto(texto: str, limite: int = LIMITE_CARACTERES) -> list:
@@ -48,7 +55,7 @@ def _postar(corpo: dict):
         return True, None
 
     # Se a Meta recusar, mostra o motivo no terminal (ajuda a depurar)
-    print("Erro ao enviar:", resposta.status_code, resposta.text)
+    print("Erro ao enviar:", resposta.status_code, _mascarar_telefones(resposta.text))
     try:
         codigo = resposta.json().get("error", {}).get("code")
     except ValueError:
