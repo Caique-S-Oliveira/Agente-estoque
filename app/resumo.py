@@ -20,9 +20,9 @@ import hmac
 import os
 from datetime import datetime, timedelta, timezone
 
-import database
-import whatsapp
-from cerebro import _moeda
+from app import database
+from app import whatsapp
+from app.cerebro import _moeda
 
 FUSO_BRASILIA = timezone(timedelta(hours=-3))
 DIAS_ENVIO = {0, 1, 2, 3, 4, 5}            # segunda (0) a sábado (5). Domingo a empresa fecha

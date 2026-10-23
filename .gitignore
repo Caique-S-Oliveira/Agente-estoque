@@ -9,8 +9,6 @@ venv/
 .venv/
 
 # Dados de clientes e arquivos gerados
+data/
 *.csv
 *.xlsx
-pendencias_importacao.csv
-products-VTech.csv
-Backup

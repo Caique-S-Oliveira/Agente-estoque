@@ -6,19 +6,19 @@ então só você consegue importar. Ninguém importa pelo WhatsApp.
 Como usar (3 passos):
 
   1) Gerar a planilha modelo para o cliente preencher:
-        python importar_estoque.py --modelo
+        python -m scripts.importar_estoque --modelo
 
   2) PRÉVIA (não grava nada): mostra o que seria cadastrado e o que tem problema:
-        python importar_estoque.py estoque_do_cliente.xlsx --empresa "VTech Embalagens"
+        python -m scripts.importar_estoque estoque_do_cliente.xlsx --empresa "VTech Embalagens"
 
   3) Se a prévia estiver boa, rode de novo com --confirmar para gravar:
-        python importar_estoque.py estoque_do_cliente.xlsx --empresa "VTech Embalagens" --confirmar
+        python -m scripts.importar_estoque estoque_do_cliente.xlsx --empresa "VTech Embalagens" --confirmar
 
 Regras:
   - Nome repetido (na planilha ou já cadastrado no sistema): PULA e lista. Rodar duas vezes é seguro.
   - Sem preço de custo: aceita e grava 0 (lista quantos ficaram assim).
   - Linha com problema (nome vazio, quantidade inválida...): não grava e lista o motivo.
-  - Tudo que foi pulado ou deu problema vai para o arquivo pendencias_importacao.csv.
+  - Tudo que foi pulado ou deu problema vai para o arquivo data/pendencias_importacao.csv.
   - Cada item entra com o movimento "Estoque inicial" no histórico, em nome de um administrador.
 """
 import argparse
@@ -93,7 +93,7 @@ def achar_cabecalho(linhas: list):
                     mapa[coluna] = posicao
         if "nome" in mapa:
             return i, mapa
-    raise SystemExit("❌ Não achei a coluna 'Nome' no cabeçalho. Use o modelo (python importar_estoque.py --modelo).")
+    raise SystemExit("❌ Não achei a coluna 'Nome' no cabeçalho. Use o modelo (python -m scripts.importar_estoque --modelo).")
 
 
 # ---------------------------------------------------------------- conversão de valores
@@ -259,12 +259,12 @@ def mostrar_previa(resultado: dict, empresa: dict):
     for linha, nome, tipo, motivo in pend[:30]:
         print(f"   {'⏭️' if tipo == 'pulado' else '🔧' if tipo == 'ajustado' else '❌'} linha {linha}: {nome or '(sem nome)'} → {motivo}")
     if len(pend) > 30:
-        print(f"   … e mais {len(pend) - 30} no arquivo pendencias_importacao.csv")
+        print(f"   … e mais {len(pend) - 30} no arquivo data/pendencias_importacao.csv")
     for a in [x for x in av if "parece com" in x][:10]:
         print("   ⚠️ " + a)
 
 
-def salvar_pendencias(pendencias: list, caminho: str = "pendencias_importacao.csv"):
+def salvar_pendencias(pendencias: list, caminho: str = "data/pendencias_importacao.csv"):
     """Grava o que não foi importado, para o cliente corrigir (abre bem no Excel)."""
     if not pendencias:
         return None
@@ -276,7 +276,7 @@ def salvar_pendencias(pendencias: list, caminho: str = "pendencias_importacao.cs
 
 
 # ---------------------------------------------------------------- planilha modelo
-def criar_modelo(caminho: str = "modelo_importacao.xlsx", com_codigo: bool = False):
+def criar_modelo(caminho: str = "data/modelo_importacao.xlsx", com_codigo: bool = False):
     """Cria a planilha modelo (com exemplos e instruções) para o cliente preencher."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
@@ -351,7 +351,7 @@ def main():
 
     if not args.confirmar:
         salvar_pendencias(pendencias)
-        print("\nNada foi gravado (isto é só a prévia)." + (" Pendências em pendencias_importacao.csv." if pendencias else ""))
+        print("\nNada foi gravado (isto é só a prévia)." + (" Pendências em data/pendencias_importacao.csv." if pendencias else ""))
         print("Se estiver certo, rode de novo com --confirmar.")
         return
 

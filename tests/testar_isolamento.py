@@ -46,7 +46,7 @@ def parte_estatica():
     Lê o database.py e confere, consulta por consulta, que todas filtram por empresa_id.
     """
     print("\n=== 1) ESTÁTICA: toda consulta filtra por empresa_id? ===")
-    arquivo = Path(__file__).with_name("database.py")
+    arquivo = Path(__file__).resolve().parent.parent / "app" / "database.py"
     fonte = arquivo.read_text(encoding="utf-8")
     arvore = ast.parse(fonte)
     verificadas = 0
@@ -83,7 +83,7 @@ def parte_dinamica():
     Usa o banco de verdade: uma empresa falsa tenta ler e mexer nos dados da empresa real.
     """
     print("\n=== 2) DINÂMICA: uma empresa falsa tenta ler os dados da VTech ===")
-    import database as db
+    from app import database as db
 
     # Pega dados REAIS para a empresa falsa tentar alcançar
     usuario = None

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
-from config import SUPABASE_URL, SUPABASE_KEY
+from app.config import SUPABASE_URL, SUPABASE_KEY
 
 # Cria UMA conexão que o projeto inteiro reutiliza
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)

@@ -1,4 +1,4 @@
-from agente import processar_mensagem
+from app.agente import processar_mensagem
 
 # Troque pelo seu telefone cadastrado (com o 9)
 MEU_TELEFONE = "5511949188851"

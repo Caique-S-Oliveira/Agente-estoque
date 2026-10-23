@@ -6,8 +6,8 @@ Rode:  python testar_frases.py
 import re
 from types import SimpleNamespace
 import unicodedata
-from database import usuario_autorizado, buscar_item_por_codigo
-from cerebro import chamar_modelo, extrair, _resolver_local, _incompletos
+from app.database import usuario_autorizado, buscar_item_por_codigo
+from app.cerebro import chamar_modelo, extrair, _resolver_local, _incompletos
 
 MEU_TELEFONE = "5511949188851"   # troque pelo seu telefone cadastrado (com o 9)
 

@@ -25,10 +25,10 @@ from datetime import datetime, timezone, timedelta
 
 import anthropic
 
-from config import (
+from app.config import (
     ANTHROPIC_API_KEY, MODELO_IA, LIMITE_IA_DIARIO, QTD_CONFIRMAR_ACIMA_DE,
 )
-from database import (
+from app.database import (
     todos_itens, buscar_item_por_codigo, registrar_movimentacao,
     registrar_uso_ia, uso_ia_desde, buscar_empresa, ajustar_saldo,
     carregar_estado, salvar_estado, limite_ia_da_empresa,

@@ -2,10 +2,10 @@ import re
 import unicodedata
 from difflib import SequenceMatcher
 from datetime import datetime, timezone, timedelta
-from config import MARGEM_SUGERIDA, PRECO_IA_ENTRADA_USD, PRECO_IA_SAIDA_USD
-from cerebro import interpretar, cancelar_pendente, _achar_itens, _executar_movimento, _extrair_custo
-from resumo import montar_resumo
-from database import (
+from app.config import MARGEM_SUGERIDA, PRECO_IA_ENTRADA_USD, PRECO_IA_SAIDA_USD
+from app.cerebro import interpretar, cancelar_pendente, _achar_itens, _executar_movimento, _extrair_custo
+from app.resumo import montar_resumo
+from app.database import (
     ultimas_entradas,
     usuario_autorizado, salvar_mensagem,
     buscar_item_por_codigo, buscar_itens, adicionar_item,

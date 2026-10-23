@@ -1,5 +1,5 @@
 import httpx
-from config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
+from app.config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
 
 # O WhatsApp recusa mensagens com mais de 4096 caracteres. Ficamos abaixo, com folga.
 LIMITE_CARACTERES = 4000

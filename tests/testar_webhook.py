@@ -14,8 +14,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-import main
-from config import META_APP_SECRET
+from app import main
+from app.config import META_APP_SECRET
 
 cliente = TestClient(main.app)
 falhas = []

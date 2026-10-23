@@ -1,4 +1,4 @@
-from config import SUPABASE_URL, SUPABASE_KEY
+from app.config import SUPABASE_URL, SUPABASE_KEY
 import socket
 
 print("URL lida do .env:", repr(SUPABASE_URL))

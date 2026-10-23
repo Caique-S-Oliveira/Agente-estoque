@@ -1,5 +1,5 @@
 import httpx
-from config import WHATSAPP_TOKEN
+from app.config import WHATSAPP_TOKEN
 
 WABA_ID = 2349238762576029
 
