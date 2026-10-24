@@ -12,3 +12,6 @@ venv/
 data/
 *.csv
 *.xlsx
+
+# Auditoria de seguranca/LGPD (relatorios e saidas brutas das ferramentas ficam locais)
+audit/
