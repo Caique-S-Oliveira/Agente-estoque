@@ -24,7 +24,13 @@ TABELAS_DE_EMPRESA = {"itens", "movimentacoes", "usuarios", "mensagens", "uso_ia
 # Funções que de propósito NÃO recebem empresa_id (e por quê):
 EXCECOES = {
     "usuario_autorizado": "descobre a empresa a partir do telefone de quem escreveu",
-    "marcar_mensagem_processada": "o ID da mensagem da Meta é único no mundo; só grava, não lê dados de empresa",
+    "reservar_mensagem": "o ID da mensagem da Meta é único no mundo; só controla o estado dele",
+    "finalizar_mensagem": "atualiza o estado do ID da mensagem da Meta; não toca em dados de empresa",
+    "definir_chave_base": "ajuda local (chave de idempotência), não acessa o banco",
+    "restaurar_chave_base": "ajuda local (chave de idempotência), não acessa o banco",
+    "proxima_chave": "ajuda local (chave de idempotência), não acessa o banco",
+    "_traduzir_resultado": "só formata a resposta de uma função do banco",
+    "_duplicada": "só interpreta uma exceção",
     "limpar_mensagens_antigas": "manutenção da tabela de IDs de mensagens; não toca em dados de empresa",
 }
 

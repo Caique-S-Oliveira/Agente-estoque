@@ -147,6 +147,6 @@ database.py (Supabase) grava a movimentação  →  whatsapp.py responde
 | `app/resumo.py` | Resumo da manhã (sem IA) e envio com plano B de modelo |
 | `app/database.py` | Todas as consultas ao Supabase (sempre filtradas por `empresa_id`) |
 | `app/whatsapp.py` | Envio de texto e de modelo pela Meta |
-| `migracoes/` | SQLs numerados do banco (008 custo unitário, 009 resumos enviados) |
+| `migracoes/` | SQLs numerados. 010 (movimentação atômica) e 011 (estados da mensagem) são novos e **ainda não aplicados**; 000–009 (esquema base, 008, 009) não estão no repositório e precisam ser exportados do Supabase |
 | `tests/testar_*.py` | Testes de frases, de isolamento entre empresas e do webhook |
 | `scripts/` | Ferramentas de apoio (importação inicial e backup) |

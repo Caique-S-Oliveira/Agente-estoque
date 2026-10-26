@@ -17,6 +17,7 @@ MAPA DO ARQUIVO (de cima para baixo)
 Segurança: a IA só sugere. Código do item, saldo, permissão e limites são conferidos aqui.
 Mensagens das pessoas e nomes do catálogo são tratados como DADOS, nunca como ordens.
 """
+import hashlib
 import json
 import re
 import time
@@ -32,6 +33,7 @@ from app.database import (
     todos_itens, buscar_item_por_codigo, registrar_movimentacao,
     registrar_uso_ia, uso_ia_desde, buscar_empresa, ajustar_saldo,
     carregar_estado, salvar_estado, limite_ia_da_empresa,
+    definir_chave_base, restaurar_chave_base,
 )
 
 # Conexão com a IA (None se a chave não estiver no .env)
@@ -563,6 +565,10 @@ def _aviso_minimo(item) -> str:
     return f"\n⚠️ {item['nome']} ficou com {item['quantidade']} (mínimo {minimo}). Hora de repor!"
 
 
+_MSG_INCERTO = ("❌ Não consegui confirmar no banco se isso foi registrado. "
+                "Confira com /historico antes de repetir.")
+
+
 def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
     """
     EXECUTA de verdade uma entrada ou saída (grava no banco). Só é chamada depois de
@@ -583,10 +589,14 @@ def _executar_movimento(empresa_id, usuario_id, texto_original, dados) -> str:
             custo_antes = float(antes["preco_custo"])
 
     # O texto original fica no histórico: ajuda a auditar se a IA entendeu errado
-    item, erro = registrar_movimentacao(
-        empresa_id, usuario_id, codigo, tipo, qtd, observacao=texto_original[:120] or None,
-        custo_unitario=custo,
-    )
+    try:
+        item, erro = registrar_movimentacao(
+            empresa_id, usuario_id, codigo, tipo, qtd, observacao=texto_original[:120] or None,
+            custo_unitario=custo,
+        )
+    except Exception as ex:
+        print("Falha ao registrar movimentação:", repr(ex))
+        return _MSG_INCERTO
     if erro:
         return f"❌ {erro}"
 
@@ -602,8 +612,12 @@ def _executar_pedido(empresa_id, usuario_id, texto_original, pedido) -> str:
     if pedido["tipo"] != "ajuste":
         return _executar_movimento(empresa_id, usuario_id, texto_original, pedido)
     antes = buscar_item_por_codigo(empresa_id, pedido["codigo"])
-    item, erro = ajustar_saldo(empresa_id, usuario_id, pedido["codigo"], pedido["quantidade"],
-                               texto_original[:120])
+    try:
+        item, erro = ajustar_saldo(empresa_id, usuario_id, pedido["codigo"], pedido["quantidade"],
+                                   texto_original[:120])
+    except Exception as ex:
+        print("Falha ao ajustar saldo:", repr(ex))
+        return _MSG_INCERTO
     if erro:
         return f"❌ {erro}"
     return (f"✅ Saldo ajustado: {item['nome']}\nDe {antes['quantidade'] if antes else '?'} para {item['quantidade']}"
@@ -705,6 +719,10 @@ def cancelar_pendente(empresa_id: str, usuario_id: str):
     _salvar_estado(empresa_id, usuario_id, antes)
 
 
+class EstadoIndisponivel(Exception):
+    """Não foi possível ler o estado da conversa (confirmações pendentes)."""
+
+
 def _carregar_estado(empresa_id: str, usuario_id: str) -> str:
     """
     Lê do banco o que esta pessoa deixou em aberto e coloca nos dicionários de trabalho.
@@ -715,7 +733,7 @@ def _carregar_estado(empresa_id: str, usuario_id: str) -> str:
         estado = carregar_estado(empresa_id, usuario_id) or {}
     except Exception as erro:
         print("Falha ao ler o estado da conversa:", erro)
-        estado = {}
+        raise EstadoIndisponivel() from erro      # sem estado validado, nada é executado
     _historico[usuario_id] = [tuple(x) for x in estado.get("historico", [])]
     _limpar_pendencias(usuario_id)
     if estado.get("pendente"):
@@ -882,7 +900,11 @@ def interpretar(empresa_id: str, usuario: dict, texto: str, formatar_itens, coma
     (_interpretar_fluxo) ela lê o estado da conversa do banco e o grava de volta no fim.
     """
     usuario_id = usuario["id"]
-    lido = _carregar_estado(empresa_id, usuario_id)
+    try:
+        lido = _carregar_estado(empresa_id, usuario_id)
+    except EstadoIndisponivel:
+        return ("⚠️ Não consegui verificar suas confirmações pendentes e por segurança não executei nada. "
+                "Envie o pedido novamente em instantes.")
     try:
         return _interpretar_fluxo(empresa_id, usuario, texto, formatar_itens, comando)
     finally:

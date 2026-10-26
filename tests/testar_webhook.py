@@ -57,14 +57,15 @@ vistos = set()
 def marcar_falso(id_, empresa_id=None):
     """Finge o banco: devolve True na 1ª vez de cada ID e False nas seguintes."""
     if id_ in vistos:
-        return False
+        return "concluida"
     vistos.add(id_)
-    return True
+    return "nova"
 
 
 with patch.object(main, "processar_mensagem", side_effect=lambda t, x: "resp:" + x) as cerebro, \
      patch.object(main, "enviar_mensagem") as zap, \
-     patch.object(main.database, "marcar_mensagem_processada", side_effect=marcar_falso), \
+     patch.object(main.database, "reservar_mensagem", side_effect=marcar_falso), \
+     patch.object(main.database, "finalizar_mensagem"), \
      patch.object(main.database, "limpar_mensagens_antigas"):
 
     def zerar():

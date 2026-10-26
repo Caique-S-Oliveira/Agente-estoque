@@ -667,7 +667,8 @@ def _executar_comando_bruto(usuario: dict, texto: str) -> str:
         return "Comando não reconhecido.\n\n" + ajuda_para(usuario)
     except Exception as erro:
         print("Erro no comando:", erro)
-        return "❌ Deu um erro interno. Veja o terminal para detalhes."
+        return ("❌ Tive um erro e não consegui confirmar se a operação foi aplicada. "
+                "Confira com /historico antes de repetir.")
 
 
 def processar_mensagem(telefone: str, texto: str) -> str:
@@ -699,7 +700,7 @@ def processar_mensagem(telefone: str, texto: str) -> str:
                                lambda cmd, args="": executar_comando(usuario, f"{cmd} {args}".strip()))
         except Exception as erro:
             print("Erro na IA:", repr(erro))
-            return ("❌ Não consegui interpretar agora. Tente de novo em instantes "
-                    "ou use os comandos (/ajuda).")
+            return ("❌ Não consegui concluir agora e não tenho certeza se algo foi registrado. "
+                    "Confira com /historico antes de repetir, ou use os comandos (/ajuda).")
 
     return executar_comando(usuario, texto)

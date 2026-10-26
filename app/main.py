@@ -107,14 +107,15 @@ def _tratar_mensagem(msg: dict):
     if not id_msg or not telefone_original:
         return
 
-    try:
-        if not database.marcar_mensagem_processada(id_msg):
-            print("Mensagem repetida ignorada:", id_msg[-8:])
-            return
-    except Exception as erro:
-        # Se a checagem falhar (banco fora do ar), seguimos: é melhor responder do que ficar mudo.
-        print("Aviso: não consegui checar duplicidade:", repr(erro))
+    # Sem controle confiável de duplicidade NÃO se executa nada: a exceção sobe, o webhook responde
+    # 503 e a Meta reenvia mais tarde.
+    situacao = database.reservar_mensagem(id_msg)
+    if situacao in ("concluida", "em_andamento"):
+        print("Mensagem repetida ignorada:", id_msg[-8:], situacao)
+        return
 
+    # As movimentações desta mensagem usam chaves derivadas do ID dela: reprocessar não duplica.
+    token = database.definir_chave_base(id_msg)
     try:
         if msg.get("type") == "text":
             telefone = normalizar_telefone(telefone_original)
@@ -127,9 +128,19 @@ def _tratar_mensagem(msg: dict):
             resposta = "Por enquanto só entendo mensagens de texto."
     except Exception as erro:
         print("Erro ao processar:", repr(erro))
-        resposta = "❌ Tive um problema para processar sua mensagem. Tente de novo em instantes."
+        database.finalizar_mensagem(id_msg, "falhou")
+        raise ProcessamentoFalhou() from erro        # a Meta reenviará; a chave evita duplicar
+    finally:
+        database.restaurar_chave_base(token)
 
+    # Só marca como concluída quando o processamento terminou. O envio é à parte: se o WhatsApp
+    # falhar, a operação já está gravada e reenviar a mensagem não a repetiria.
+    database.finalizar_mensagem(id_msg, "concluida")
     enviar_mensagem(telefone_original, resposta)
+
+
+class ProcessamentoFalhou(Exception):
+    """A mensagem não foi concluída; deve ser reenviada pela Meta."""
 
 
 # ---------------------------------------------------------------- 4) limpeza diária
@@ -219,8 +230,12 @@ async def receber_webhook(request: Request):
         for msg in mensagens:
             # roda em outra "linha" para não travar o servidor enquanto a IA pensa
             await run_in_threadpool(_tratar_mensagem, msg)
+    except json.JSONDecodeError:
+        return Response(content="Corpo inválido", status_code=400)
     except Exception as erro:
+        # Falha transitória (banco fora, processamento interrompido): 503 faz a Meta reenviar.
+        # É seguro reenviar: duplicidade é barrada no banco e as movimentações têm chave única.
         print("Erro no webhook:", repr(erro))
+        return Response(content="Tente novamente", status_code=503)
 
-    # Sempre responde 200 para a Meta não ficar reenviando a mesma mensagem
     return {"status": "ok"}

@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from app.config import SUPABASE_URL, SUPABASE_KEY
@@ -169,6 +170,50 @@ def adicionar_item(empresa_id, usuario_id, codigo, nome, maquina, quantidade,
     return item
 
 
+# Chave de idempotência: identifica o EFEITO de negócio. Quem processa uma mensagem define a base
+# (ID da mensagem da Meta, ou ID da confirmação); cada movimentação ganha base:1, base:2...
+# Se o mesmo pedido chegar de novo, o banco devolve o resultado já gravado em vez de repetir.
+_chave_base = ContextVar("chave_base", default=None)
+_chave_n = ContextVar("chave_n", default=0)
+
+
+def definir_chave_base(base):
+    """Define a base das chaves (None desliga). Devolve um token para restaurar com restaurar_chave_base."""
+    token = (_chave_base.set(base), _chave_n.set(0))
+    return token
+
+
+def restaurar_chave_base(token):
+    _chave_base.reset(token[0])
+    _chave_n.reset(token[1])
+
+
+def proxima_chave():
+    base = _chave_base.get()
+    if not base:
+        return None
+    _chave_n.set(_chave_n.get() + 1)
+    return f"{base}:{_chave_n.get()}"
+
+
+def _traduzir_resultado(resultado, codigo: str):
+    """Converte a resposta das funções do banco em (item, erro), no formato que o resto do código usa."""
+    if not isinstance(resultado, dict):
+        raise RuntimeError("Resposta inesperada do banco ao movimentar estoque.")
+    erro = resultado.get("erro")
+    if not erro:
+        return resultado["item"], None
+    if erro == "item_nao_encontrado":
+        return None, f"Não achei nenhum item com o código {codigo.upper()}."
+    if erro == "saldo_insuficiente":
+        return None, f"Saldo insuficiente: {resultado.get('nome')} tem só {resultado.get('saldo')} unidade(s)."
+    if erro == "saldo_negativo":
+        return None, "O saldo não pode ser negativo."
+    if erro == "sem_mudanca":
+        return None, f"{resultado.get('nome')} já está com {resultado.get('saldo')} unidade(s). Nada a ajustar."
+    return None, "Pedido inválido."
+
+
 def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: str,
                            quantidade: int, observacao: str = None,
                            origem: str = "whatsapp", custo_unitario: float = None,
@@ -181,65 +226,22 @@ def registrar_movimentacao(empresa_id: str, usuario_id: str, codigo: str, tipo: 
     junto com o custo que o item tinha na hora (base do lucro).
     Retorna (item_atualizado, mensagem_de_erro). Um dos dois é None.
     """
-    item = buscar_item_por_codigo(empresa_id, codigo)
-    if item is None:
-        return None, f"Não achei nenhum item com o código {codigo.upper()}."
-
-    saldo_anterior = item["quantidade"]  # guarda ANTES de qualquer alteração
-
-    if tipo == "entrada":
-        nova_qtd = saldo_anterior + quantidade
-    else:  # saida
-        nova_qtd = saldo_anterior - quantidade
-        if nova_qtd < 0:
-            return None, (
-                f"Saldo insuficiente: {item['nome']} tem só "
-                f"{saldo_anterior} unidade(s)."
-            )
-
-    # Só entrada tem custo de compra. Saída e ajuste ignoram o valor, mesmo que alguém mande.
-    usar_custo = tipo == "entrada" and custo_unitario is not None
-    usar_venda = tipo == "saida" and valor_venda_unitario is not None
-
-    # Campos extras do histórico (colunas das migrações 008 e 009): só são enviados quando há valor,
-    # assim movimentações comuns continuam iguais e não dependem das colunas novas.
-    extras = {}
-    if usar_custo:
-        extras["custo_unitario"] = custo_unitario
-    if usar_venda:
-        extras["valor_venda_unitario"] = valor_venda_unitario
-        extras["custo_unitario"] = float(item["preco_custo"])   # custo do item na hora da venda
-
-    # 1) Atualiza o saldo do item (e o custo, se esta entrada trouxe o preço pago)
-    dados_item = {
-        "quantidade": nova_qtd,
-        "atualizado_em": datetime.now(timezone.utc).isoformat(),
-    }
-    if usar_custo:
-        dados_item["preco_custo"] = custo_unitario
-    resposta = (
-        supabase.table("itens")
-        .update(dados_item)
-        .eq("id", item["id"])
-        .eq("empresa_id", empresa_id)
-        .execute()
-    )
-
-    # 2) Grava no histórico: quem fez, quanto, e o saldo antes e depois
-    supabase.table("movimentacoes").insert({
-        "empresa_id": empresa_id,
-        "usuario_id": usuario_id,
-        "item_id": item["id"],
-        "tipo": tipo,
-        "quantidade": quantidade,
-        "saldo_anterior": saldo_anterior,
-        "saldo_novo": nova_qtd,
-        "observacao": observacao,
-        "origem": origem,
-        **extras,
-    }).execute()
-
-    return resposta.data[0], None
+    # Tudo acontece DENTRO do banco, numa única transação com a linha do item bloqueada:
+    # valida o saldo, atualiza o item e grava o histórico, ou não faz nada (migracoes/010).
+    # Só entrada tem custo de compra e só saída tem valor de venda; o resto é ignorado.
+    resultado = supabase.rpc("movimentar_estoque", {
+        "p_empresa_id": empresa_id,
+        "p_usuario_id": usuario_id,
+        "p_codigo": codigo,
+        "p_tipo": tipo,
+        "p_quantidade": quantidade,
+        "p_observacao": observacao,
+        "p_origem": origem,
+        "p_custo_unitario": custo_unitario if tipo == "entrada" else None,
+        "p_valor_venda_unitario": valor_venda_unitario if tipo == "saida" else None,
+        "p_chave": proxima_chave(),
+    }).execute().data
+    return _traduzir_resultado(resultado, codigo)
 
 
 def ultimas_entradas(empresa_id: str, item_ids: list):
@@ -280,41 +282,16 @@ def ajustar_saldo(empresa_id: str, usuario_id: str, codigo: str, novo_saldo: int
     if novo_saldo < 0:
         return None, "O saldo não pode ser negativo."
 
-    item = buscar_item_por_codigo(empresa_id, codigo)
-    if item is None:
-        return None, f"Não achei nenhum item com o código {codigo.upper()}."
-
-    saldo_anterior = item["quantidade"]
-    if novo_saldo == saldo_anterior:
-        return None, f"{item['nome']} já está com {saldo_anterior} unidade(s). Nada a ajustar."
-
-    # 1) Atualiza o saldo do item
-    resposta = (
-        supabase.table("itens")
-        .update({
-            "quantidade": novo_saldo,
-            "atualizado_em": datetime.now(timezone.utc).isoformat(),
-        })
-        .eq("id", item["id"])
-        .eq("empresa_id", empresa_id)
-        .execute()
-    )
-
-    # 2) Histórico: "quantidade" guarda o tamanho da diferença;
-    #    saldo_anterior e saldo_novo mostram se subiu ou desceu
-    supabase.table("movimentacoes").insert({
-        "empresa_id": empresa_id,
-        "usuario_id": usuario_id,
-        "item_id": item["id"],
-        "tipo": "ajuste",
-        "quantidade": abs(novo_saldo - saldo_anterior),
-        "saldo_anterior": saldo_anterior,
-        "saldo_novo": novo_saldo,
-        "observacao": observacao,
-        "origem": origem,
-    }).execute()
-
-    return resposta.data[0], None
+    resultado = supabase.rpc("ajustar_saldo_tx", {
+        "p_empresa_id": empresa_id,
+        "p_usuario_id": usuario_id,
+        "p_codigo": codigo,
+        "p_novo_saldo": novo_saldo,
+        "p_observacao": observacao,
+        "p_origem": origem,
+        "p_chave": proxima_chave(),
+    }).execute().data
+    return _traduzir_resultado(resultado, codigo)
 
 
 def todos_itens(empresa_id: str):
@@ -493,24 +470,60 @@ def uso_ia_desde(empresa_id: str, desde: datetime):
 # SEGURANÇA E ESTADO (Fase 2)
 # =========================================
 
-def marcar_mensagem_processada(wa_message_id: str, empresa_id: str = None) -> bool:
+MINUTOS_PROCESSANDO_TRAVADO = 2
+
+
+def _duplicada(erro) -> bool:
+    texto = str(erro).lower()
+    return "23505" in texto or "duplicate" in texto
+
+
+def reservar_mensagem(wa_message_id: str, empresa_id: str = None) -> str:
     """
-    Anti-duplicidade. A Meta às vezes reenvia a mesma mensagem; cada uma tem um ID único.
-    Tenta gravar o ID: se for NOVO, devolve True (pode processar). Se já existia, devolve False
-    (é repetida: ignorar). A própria chave primária do banco decide, então funciona mesmo que
-    duas cópias cheguem ao mesmo tempo.
+    Controle de estados de uma mensagem da Meta. Devolve:
+      "nova"         -> primeira vez: processar.
+      "retomar"      -> já tentamos e falhou (ou travou em "processando"): processar de novo. É seguro
+                        porque as movimentações têm chave de idempotência.
+      "em_andamento" -> outra cópia está processando agora: ignorar.
+      "concluida"    -> já foi processada: ignorar.
+    Se o banco não responder, a exceção SOBE de propósito: sem controle confiável não se executa nada.
     """
+    agora = datetime.now(timezone.utc)
     try:
         supabase.table("mensagens_processadas").insert({
-            "wa_message_id": wa_message_id,
-            "empresa_id": empresa_id,
+            "wa_message_id": wa_message_id, "empresa_id": empresa_id,
+            "estado": "processando", "tentativas": 1, "atualizado_em": agora.isoformat(),
         }).execute()
-        return True
+        return "nova"
     except Exception as erro:
-        texto = str(erro).lower()
-        if "23505" in texto or "duplicate" in texto:      # violação de chave única = já vista
-            return False
-        raise                                              # outro erro: não esconder
+        if not _duplicada(erro):
+            raise
+    linha = (supabase.table("mensagens_processadas").select("estado,tentativas,atualizado_em")
+             .eq("wa_message_id", wa_message_id).execute().data or [None])[0]
+    if linha is None:
+        raise RuntimeError("Mensagem duplicada sem registro correspondente.")
+    if linha["estado"] == "concluida":
+        return "concluida"
+    travado = False
+    if linha["estado"] == "processando":
+        visto = datetime.fromisoformat(linha["atualizado_em"].replace("Z", "+00:00"))
+        travado = agora - visto > timedelta(minutes=MINUTOS_PROCESSANDO_TRAVADO)
+        if not travado:
+            return "em_andamento"
+    # Retomada: só UMA cópia vence, porque o update exige o estado e a tentativa que lemos.
+    ganhou = (supabase.table("mensagens_processadas")
+              .update({"estado": "processando", "tentativas": linha["tentativas"] + 1,
+                       "atualizado_em": agora.isoformat()})
+              .eq("wa_message_id", wa_message_id).eq("estado", linha["estado"])
+              .eq("tentativas", linha["tentativas"]).execute().data)
+    return "retomar" if ganhou else "em_andamento"
+
+
+def finalizar_mensagem(wa_message_id: str, estado: str):
+    """Marca a mensagem como 'concluida' ou 'falhou' (só depois do efeito no banco)."""
+    supabase.table("mensagens_processadas").update({
+        "estado": estado, "atualizado_em": datetime.now(timezone.utc).isoformat(),
+    }).eq("wa_message_id", wa_message_id).execute()
 
 
 def limpar_mensagens_antigas(dias: int = 7):
